@@ -37,7 +37,5 @@ exported from a developer-portal app with OAuth 1.0a user context).
 
 ## Known gaps / next steps
 
-- `dist-newstyle/` is untracked; a `.gitignore` would help
-- Consider sharing the HTTP `Manager` across requests
 - `dailyOutput` re-resolves the user ID for each followed account; could
   be optimized by threading IDs through
