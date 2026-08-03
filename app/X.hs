@@ -5,6 +5,7 @@
 module X
   ( followed
   , dailyOutput
+  , manager
   ) where
 
 import Business (Account(..), Output(..))
@@ -32,11 +33,11 @@ import Data.Time
   , getCurrentTime
   )
 import Network.HTTP.Client
-  ( Request
+  ( Manager
+  , Request
   , defaultRequest
   , host
   , httpLbs
-  , newManager
   , path
   , port
   , queryString
@@ -45,9 +46,12 @@ import Network.HTTP.Client
   , responseStatus
   , secure
   )
+import qualified Network.HTTP.Client as HTTP
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types (statusIsSuccessful)
+import Control.Monad (when)
 import System.Environment (lookupEnv)
+import System.IO (stderr)
 
 apiHost :: BS.ByteString
 apiHost = "api.x.com"
@@ -169,9 +173,13 @@ baseRequest route query =
     , queryString = query
     }
 
+-- | A connection manager for X API calls, created once and reused.
+manager :: IO Manager
+manager = HTTP.newManager tlsManagerSettings
+
 -- | GET an X API endpoint, OAuth-signed, returning the response body.
-signedGet :: Creds -> T.Text -> T.Text -> [(T.Text, T.Text)] -> IO LBS.ByteString
-signedGet creds method route queryParams = do
+signedGet :: Manager -> Bool -> Creds -> T.Text -> T.Text -> [(T.Text, T.Text)] -> IO LBS.ByteString
+signedGet mgr verbose creds method route queryParams = do
   now <- getCurrentTime
   let oa = newOAuth now creds
       sig = signature creds method (apiBase <> route) queryParams oa
@@ -181,8 +189,10 @@ signedGet creds method route queryParams = do
         (baseRequest route query)
           { requestHeaders = [("Authorization", authorization)]
           }
-  manager <- newManager tlsManagerSettings
-  response <- httpLbs request manager
+  when verbose $ do
+    let q = renderPairs (encodePairs queryParams)
+    BSC.hPutStrLn stderr (TE.encodeUtf8 (apiBase <> route <> if T.null q then "" else "?" <> q))
+  response <- httpLbs request mgr
   let status = responseStatus response
       body = responseBody response
   if statusIsSuccessful status
@@ -209,10 +219,10 @@ decodeChecked body =
       Nothing -> pure value
 
 -- | Numeric ID for an account.
-lookupUserId :: Creds -> Account -> IO T.Text
-lookupUserId creds (Account handle) = do
+lookupUserId :: Manager -> Bool -> Creds -> Account -> IO T.Text
+lookupUserId mgr verbose creds (Account handle) = do
   let route = "/2/users/by/username/" <> pctEncode (T.pack handle)
-  body <- signedGet creds "GET" route []
+  body <- signedGet mgr verbose creds "GET" route []
   value <- decodeChecked body
   case lookupText "id" =<< lookupKey "data" value of
     Just uid -> pure uid
@@ -233,15 +243,15 @@ followingPage value =
   in (accounts, metaNextToken value)
 
 -- | Accounts followed by the given one.
-followed :: Account -> IO [Account]
-followed account = do
+followed :: Manager -> Bool -> Account -> IO [Account]
+followed mgr verbose account = do
   creds <- loadCreds
-  uid <- lookupUserId creds account
+  uid <- lookupUserId mgr verbose creds account
   let go token accounts = do
         let params =
               [("max_results", "1000")]
               <> maybe [] (\t -> [("pagination_token", t)]) token
-        body <- signedGet creds "GET" ("/2/users/" <> uid <> "/following") params
+        body <- signedGet mgr verbose creds "GET" ("/2/users/" <> uid <> "/following") params
         value <- decodeChecked body
         let (newAccounts, nextToken) = followingPage value
         case nextToken of
@@ -250,17 +260,17 @@ followed account = do
   go Nothing []
 
 -- | Messages sent by an account in the last 24 hours.
-dailyOutput :: Account -> IO Output
-dailyOutput account = do
+dailyOutput :: Manager -> Bool -> Account -> IO Output
+dailyOutput mgr verbose account = do
   creds <- loadCreds
-  uid <- lookupUserId creds account
+  uid <- lookupUserId mgr verbose creds account
   now <- getCurrentTime
   let since = addUTCTime (-24 * 60 * 60) now
-  count <- countTweets creds uid since
+  count <- countTweets mgr verbose creds uid since
   pure (Output account count)
 
-countTweets :: Creds -> T.Text -> UTCTime -> IO Int
-countTweets creds uid since = go Nothing 0 0
+countTweets :: Manager -> Bool -> Creds -> T.Text -> UTCTime -> IO Int
+countTweets mgr verbose creds uid since = go Nothing 0 0
   where
     go token count pages
       | pages >= maxPages = pure count
@@ -268,7 +278,7 @@ countTweets creds uid since = go Nothing 0 0
           let params =
                 [("max_results", "100"), ("start_time", rfc3339 since)]
                 <> maybe [] (\t -> [("pagination_token", t)]) token
-          body <- signedGet creds "GET" ("/2/users/" <> uid <> "/tweets") params
+          body <- signedGet mgr verbose creds "GET" ("/2/users/" <> uid <> "/tweets") params
           value <- decodeChecked body
           let n = tweetCount value
               next = metaNextToken value
