@@ -23,15 +23,16 @@ data Output = Output Account Int
 -- | The share of messages each account contributes to the total.
 data Rate = Rate { account :: Account, percent :: Percent }
 
--- | A report of the accounts that fill a feed the most.
-newtype Report = Report [Rate]
+-- | A report of the accounts that fill a feed the most, limited to the
+-- given number of accounts.
+data Report = Report [Rate] Int
 
 instance Show Report where
-  show (Report rates) =
+  show (Report rates limit) =
     let s = sortOn (Down . ratePercent) rates
         line (Rate (Account handle) p) =
           handle <> " sent " <> show p <> " of the messages"
-    in unlines ("Accounts with most messages: " : map line (take 4 s))
+    in unlines ("Accounts with most messages: " : map line (take limit s))
 
 ratePercent :: Rate -> Percent
 ratePercent (Rate _ p) = p
